@@ -628,33 +628,190 @@ button {
   right: 4px;
 }
 
-/* ── Телефоны ──────────────────────────────────── */
+/* ── Телефоны и адаптивность ──────────────────── */
 @media (max-width: 700px) {
-  .toolbar-inner,
+  :root {
+    --toolbar-h: auto;
+  }
+
+  body {
+    font-size: 14px;
+  }
+
+  .hero {
+    padding: 48px 16px 28px;
+  }
+
+  .hero-eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    margin-bottom: 12px;
+  }
+
+  .hero-title {
+    font-size: clamp(34px, 10vw, 48px);
+    line-height: 1.1;
+  }
+
+  .hero-stats {
+    margin-top: 16px;
+    font-size: 13px;
+    gap: 8px;
+  }
+
+  .toolbar {
+    padding: 8px 0;
+  }
+
+  .toolbar-inner {
+    padding: 0 12px;
+    gap: 8px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-left {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    gap: 8px;
+  }
+
+  .toolbar-right {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 8px;
+  }
+
+  .toolbar-search {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+    font-size: 14px; /* Защита от авто-зума на iOS Safari */
+    padding: 8px 14px;
+  }
+
+  .toolbar-search:focus {
+    width: auto;
+  }
+
+  .btn {
+    padding: 9px 16px;
+    font-size: 13px;
+    white-space: nowrap;
+    touch-action: manipulation;
+  }
+
+  .btn-text {
+    font-size: 13px;
+    padding: 6px 4px;
+    white-space: nowrap;
+    touch-action: manipulation;
+  }
+
   .timeline,
   .on-this-day {
-    padding-left: 12px;
-    padding-right: 12px;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-bottom: 80px;
   }
 
   .year-title {
-    margin-top: 64px;
+    margin-top: 40px;
+    margin-bottom: 4px;
+    font-size: clamp(40px, 12vw, 64px);
+  }
+
+  .month-head {
+    top: 0; /* sticky */
+    padding: 12px 0 8px;
   }
 
   .month-title,
   .month-year {
-    font-size: 24px;
+    font-size: 20px;
+  }
+
+  .month-count {
+    font-size: 12px;
+  }
+
+  .day {
+    margin: 4px 0 28px;
+  }
+
+  .day-head {
+    font-size: 11px;
+    margin-bottom: 2px;
   }
 
   .day-title {
-    font-size: 19px;
+    font-size: 18px;
+    padding: 4px 0 8px;
+  }
+
+  .day-title:focus {
+    font-size: 18px;
+  }
+
+  .otd-label {
+    font-size: 22px;
+  }
+
+  .otd-strip .tile {
+    height: 110px;
+  }
+
+  /* Просмотр фото на весь экран */
+  .lightbox {
+    grid-template-rows: 1fr auto;
   }
 
   .lb-stage {
-    padding: 52px 0 8px;
+    padding: 48px 8px 8px;
+  }
+
+  .lb-panel {
+    padding: 10px 16px calc(24px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(12,12,11,0.98), rgba(12,12,11,0.8));
+  }
+
+  .lb-caption {
+    font-size: 18px;
+    padding: 4px 0 8px;
+  }
+
+  .lb-actions {
+    gap: 16px;
+    font-size: 13px;
+    justify-content: space-between;
+  }
+
+  .lb-action {
+    padding: 8px 4px;
+    min-height: 38px;
+  }
+
+  .lb-close {
+    top: 8px;
+    right: 8px;
+    width: 44px;
+    height: 44px;
+    font-size: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .lb-nav {
     display: none;
+  }
+
+  .toast {
+    width: calc(100vw - 24px);
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    padding: 12px 14px;
   }
 }
