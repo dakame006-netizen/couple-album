@@ -1,0 +1,20 @@
+app = "daniar-kadisha-album"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  ALBUM_DATA_DIR = "/data"
+
+[[mounts]]
+  source = "album_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0

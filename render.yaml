@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: daniar-kadisha-album
+    runtime: docker
+    plan: starter
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: ALBUM_DATA_DIR
+        value: /data
+    disk:
+      name: album-data
+      mountPath: /data
+      sizeGB: 10

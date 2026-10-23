@@ -1,0 +1,14 @@
+{
+  "name": "daniar-kadisha-album",
+  "version": "1.0.0",
+  "description": "Фотоальбом Данияр и Кадиша — хронология с 12 января 2025",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "share": "ssh -o StrictHostKeyChecking=no -R 80:localhost:3000 nokey@localhost.run"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

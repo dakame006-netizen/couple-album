@@ -1,0 +1,727 @@
+(() => {
+  'use strict';
+
+  const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+  const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+  const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+  const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
+  const UPLOAD_CONCURRENCY = 2;
+  const FULL_MAX_SIDE = 2048;
+  const THUMB_MAX_SIDE = 800;
+
+  const state = {
+    config: { names: ['Данияр', 'Кадиша'], startDate: '2025-01-12' },
+    photos: [],
+    days: {},
+    order: localStorage.getItem('album.order') === 'desc' ? 'desc' : 'asc',
+    searchQuery: '',
+    grids: new Map(), // grid element → photos of that day
+    lbIndex: -1,
+    lastWidth: 0,
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  // ── Даты ────────────────────────────────────────────────────────
+  const pad = (n) => String(n).padStart(2, '0');
+  const localDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+  function toDate(s) {
+    const [y, m, d] = s.slice(0, 10).split('-').map(Number);
+    return new Date(y, m - 1, d);
+  }
+
+  function dayIndex(s) {
+    // Math.round сглаживает переходы на летнее время
+    return Math.round((toDate(s) - toDate(state.config.startDate)) / 86400000) + 1;
+  }
+
+  function plural(n, forms) {
+    const a = Math.abs(n) % 100;
+    const b = a % 10;
+    if (a > 10 && a < 20) return forms[2];
+    if (b > 1 && b < 5) return forms[1];
+    if (b === 1) return forms[0];
+    return forms[2];
+  }
+
+  const num = (n) => n.toLocaleString('ru-RU');
+
+  function formatLong(s) {
+    const d = toDate(s);
+    return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`;
+  }
+
+  function formatDayHead(s) {
+    const d = toDate(s);
+    return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}, ${WEEKDAYS[d.getDay()]}`;
+  }
+
+  function dayLabel(s) {
+    const n = dayIndex(s);
+    return n >= 1 ? `день ${num(n)}` : '';
+  }
+
+  // ── DOM-хелперы ─────────────────────────────────────────────────
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function makeTile(photo, width, height) {
+    const tile = el('button', 'tile');
+    tile.type = 'button';
+    tile.dataset.id = photo.id;
+    if (width) tile.style.width = `${width}px`;
+    if (height) tile.style.height = `${height}px`;
+    if (photo.caption) tile.title = photo.caption;
+
+    const img = new Image();
+    img.alt = photo.caption || '';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+    img.src = `/media/thumb/${photo.thumb_file}`;
+    tile.append(img);
+    return tile;
+  }
+
+  async function api(url, options = {}) {
+    const res = await fetch(url, options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || `Ошибка ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  // ── Рендер ──────────────────────────────────────────────────────
+  function sortPhotos() {
+    const dir = state.order === 'asc' ? 1 : -1;
+    state.photos.sort((a, b) => {
+      if (a.taken_at !== b.taken_at) return (a.taken_at < b.taken_at ? -1 : 1) * dir;
+      return (a.id - b.id) * dir;
+    });
+  }
+
+  function renderHeader() {
+    const [a, b] = state.config.names;
+    const names = $('names');
+    names.textContent = '';
+    names.append(`${a} `, el('span', 'amp', 'и'), ` ${b}`);
+    document.title = `${a} и ${b}`;
+
+    $('since').textContent = `вместе с ${formatLong(state.config.startDate)}`;
+    const days = dayIndex(localDate(new Date()));
+    $('daysTogether').textContent = days >= 1 ? `${num(days)} ${plural(days, ['день', 'дня', 'дней'])}` : 'скоро';
+    const count = state.photos.length;
+    $('photoCount').textContent = `${num(count)} ${plural(count, ['фотография', 'фотографии', 'фотографий'])}`;
+    $('orderBtn').textContent = state.order === 'asc' ? 'С самого начала ↓' : 'Сначала новые ↓';
+    $('randomBtn').hidden = count === 0;
+  }
+
+  function groupPhotos() {
+    const years = [];
+    let year = null;
+    let month = null;
+    let day = null;
+    const q = state.searchQuery.toLowerCase();
+    for (const photo of state.photos) {
+      const date = photo.taken_at.slice(0, 10);
+      if (q) {
+        const dayTitle = state.days[date] || '';
+        const monthName = MONTHS[Number(date.slice(5, 7)) - 1] || '';
+        const hay = `${dayTitle} ${photo.caption || ''} ${date} ${formatLong(date)} ${monthName}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      const yKey = date.slice(0, 4);
+      const mKey = date.slice(0, 7);
+      if (!year || year.key !== yKey) {
+        year = { key: yKey, months: [] };
+        years.push(year);
+        month = null;
+      }
+      if (!month || month.key !== mKey) {
+        month = { key: mKey, days: [], count: 0 };
+        year.months.push(month);
+        day = null;
+      }
+      if (!day || day.key !== date) {
+        day = { key: date, photos: [] };
+        month.days.push(day);
+      }
+      day.photos.push(photo);
+      month.count += 1;
+    }
+    return years;
+  }
+
+  function renderTimeline() {
+    sortPhotos();
+    const root = $('timeline');
+    root.textContent = '';
+    state.grids.clear();
+    $('empty').hidden = state.photos.length > 0;
+
+    const years = groupPhotos();
+    const frag = document.createDocumentFragment();
+
+    for (const year of years) {
+      const yearEl = el('section', 'year');
+      yearEl.id = `y-${year.key}`;
+      yearEl.append(el('h2', 'year-title', year.key));
+
+      for (const month of year.months) {
+        const monthEl = el('section', 'month');
+        monthEl.id = `m-${month.key}`;
+        const head = el('header', 'month-head');
+        head.append(
+          el('h3', 'month-title', MONTHS[Number(month.key.slice(5)) - 1]),
+          el('span', 'month-year', month.key.slice(0, 4)),
+          el('span', 'month-count', `${num(month.count)} фото`)
+        );
+        monthEl.append(head);
+
+        for (const day of month.days) {
+          const dayEl = el('article', 'day');
+          const dayHead = el('div', 'day-head');
+          dayHead.append(el('span', '', formatDayHead(day.key)), el('span', '', dayLabel(day.key)));
+
+          const title = el('input', 'day-title');
+          title.placeholder = 'Подпись к этому дню';
+          title.maxLength = 120;
+          title.value = state.days[day.key] || '';
+          title.dataset.date = day.key;
+
+          const grid = el('div', 'grid');
+          state.grids.set(grid, day.photos);
+          dayEl.append(dayHead, title, grid);
+          monthEl.append(dayEl);
+        }
+        yearEl.append(monthEl);
+      }
+      frag.append(yearEl);
+    }
+
+    root.append(frag);
+    layoutAll();
+    renderRail(years);
+    renderOnThisDay();
+    renderHeader();
+  }
+
+  // Ровные ряды как в хорошей фотокниге: каждый ряд растягивается точно по ширине,
+  // пропорции снимков сохраняются.
+  function layoutGrid(grid, photos) {
+    const width = grid.clientWidth;
+    if (!width) return;
+    const gap = width < 600 ? 3 : 5;
+    const target = width < 600 ? 140 : width < 1000 ? 200 : 250;
+    grid.textContent = '';
+
+    let row = [];
+    let sum = 0;
+    const flush = (height) => {
+      const rowEl = el('div', 'row');
+      rowEl.style.gap = `${gap}px`;
+      rowEl.style.marginBottom = `${gap}px`;
+      for (const [photo, ratio] of row) {
+        rowEl.append(makeTile(photo, Math.floor(ratio * height * 100) / 100, Math.round(height)));
+      }
+      grid.append(rowEl);
+      row = [];
+      sum = 0;
+    };
+
+    for (const photo of photos) {
+      const ratio = Math.min(3, Math.max(0.33, photo.width / photo.height));
+      row.push([photo, ratio]);
+      sum += ratio;
+      const height = (width - gap * (row.length - 1)) / sum;
+      if (height <= target) flush(height);
+    }
+    if (row.length) {
+      const cap = photos.length <= 2 ? target * 1.7 : target;
+      flush(Math.min(cap, (width - gap * (row.length - 1)) / sum));
+    }
+  }
+
+  function layoutAll() {
+    state.lastWidth = window.innerWidth;
+    for (const [grid, photos] of state.grids) layoutGrid(grid, photos);
+  }
+
+  function renderRail(years) {
+    const rail = $('rail');
+    rail.textContent = '';
+    for (const year of years) {
+      const y = el('a', 'rail-year', year.key);
+      y.href = `#y-${year.key}`;
+      rail.append(y);
+      for (const month of year.months) {
+        const m = el('a', '', MONTHS_SHORT[Number(month.key.slice(5)) - 1]);
+        m.href = `#m-${month.key}`;
+        rail.append(m);
+      }
+    }
+    rail.hidden = years.length === 0;
+  }
+
+  function renderOnThisDay() {
+    const box = $('onThisDay');
+    const now = new Date();
+    const md = `${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const items = state.photos.filter(
+      (p) => p.taken_at.slice(5, 10) === md && Number(p.taken_at.slice(0, 4)) < now.getFullYear()
+    );
+    box.textContent = '';
+    if (!items.length) {
+      box.hidden = true;
+      return;
+    }
+    const years = [...new Set(items.map((p) => Number(p.taken_at.slice(0, 4))))].sort((a, b) => b - a);
+    const head = el('div', 'otd-head');
+    head.append(
+      el('span', 'otd-label', 'В этот день'),
+      el(
+        'span',
+        'otd-years',
+        years
+          .map((y) => {
+            const n = now.getFullYear() - y;
+            return `${n} ${plural(n, ['год', 'года', 'лет'])} назад`;
+          })
+          .join(' · ')
+      )
+    );
+    const strip = el('div', 'otd-strip');
+    for (const photo of items.slice(0, 16)) {
+      strip.append(makeTile(photo, Math.round((140 * photo.width) / photo.height), 140));
+    }
+    box.append(head, strip);
+    box.hidden = false;
+  }
+
+  // ── Просмотр ────────────────────────────────────────────────────
+  function openLightbox(id) {
+    const index = state.photos.findIndex((p) => p.id === id);
+    if (index < 0) return;
+    state.lbIndex = index;
+    $('lightbox').hidden = false;
+    document.body.classList.add('no-scroll');
+    showLightbox();
+  }
+
+  function closeLightbox() {
+    $('lightbox').hidden = true;
+    document.body.classList.remove('no-scroll');
+    $('lbImg').removeAttribute('src');
+    state.lbIndex = -1;
+  }
+
+  function showLightbox() {
+    const photo = state.photos[state.lbIndex];
+    if (!photo) return closeLightbox();
+
+    // Сначала показываем уже загруженное превью, затем подменяем на полную версию
+    const img = $('lbImg');
+    img.src = `/media/thumb/${photo.thumb_file}`;
+    img.alt = photo.caption || '';
+    const full = new Image();
+    full.onload = () => {
+      if (state.photos[state.lbIndex] === photo) img.src = full.src;
+    };
+    full.src = `/media/full/${photo.full_file}`;
+
+    const date = photo.taken_at.slice(0, 10);
+    const time = photo.taken_at.slice(11, 16);
+    const showTime = photo.date_source === 'exif' && time !== '00:00';
+    $('lbDate').textContent = `${formatLong(date)}${showTime ? `, ${time}` : ''}`;
+    $('lbDay').textContent = `${dayLabel(date)}${dayLabel(date) ? ' · ' : ''}${state.lbIndex + 1} / ${state.photos.length}`;
+    $('lbCaption').value = photo.caption || '';
+    $('lbDateInput').value = date;
+
+    const original = $('lbOriginal');
+    original.hidden = !photo.original_file;
+    if (photo.original_file) {
+      original.href = `/media/original/${photo.original_file}`;
+      original.download = photo.original_name || photo.original_file;
+    }
+
+    $('lbPrev').hidden = state.lbIndex === 0;
+    $('lbNext').hidden = state.lbIndex === state.photos.length - 1;
+
+    for (const j of [state.lbIndex - 1, state.lbIndex + 1]) {
+      const next = state.photos[j];
+      if (next) new Image().src = `/media/full/${next.full_file}`;
+    }
+  }
+
+  function stepLightbox(delta) {
+    const next = state.lbIndex + delta;
+    if (next < 0 || next >= state.photos.length) return;
+    state.lbIndex = next;
+    showLightbox();
+  }
+
+  async function updatePhoto(photo, patch) {
+    const updated = await api(`/api/photos/${photo.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    Object.assign(photo, updated);
+    return photo;
+  }
+
+  // ── Загрузка ────────────────────────────────────────────────────
+  const upload = { queue: [], active: 0, total: 0, done: 0, added: 0, dupes: 0, failed: 0, hideTimer: null };
+
+  function enqueue(fileList) {
+    const files = [...fileList].filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+    if (!files.length) return;
+    if (upload.active === 0 && upload.queue.length === 0) {
+      Object.assign(upload, { total: 0, done: 0, added: 0, dupes: 0, failed: 0 });
+    }
+    upload.total += files.length;
+    upload.queue.push(...files);
+    updateToast();
+    pump();
+  }
+
+  function pump() {
+    while (upload.active < UPLOAD_CONCURRENCY && upload.queue.length) {
+      const file = upload.queue.shift();
+      upload.active += 1;
+      processFile(file)
+        .then((result) => {
+          upload[result] += 1;
+        })
+        .catch((err) => {
+          console.error(file.name, err);
+          upload.failed += 1;
+        })
+        .finally(() => {
+          upload.active -= 1;
+          upload.done += 1;
+          updateToast();
+          scheduleRender();
+          pump();
+        });
+    }
+  }
+
+  async function sha256Hex(file) {
+    if (!window.crypto || !crypto.subtle) return null; // недоступно по http с другого устройства
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => {
+        URL.revokeObjectURL(img.src);
+        reject(new Error('Браузер не может открыть этот файл (возможно, HEIC)'));
+      };
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  function resizeToJpeg(img, maxSide, quality) {
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const width = Math.max(1, Math.round(img.naturalWidth * scale));
+    const height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, width, height);
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => (blob ? resolve({ blob, width, height }) : reject(new Error('Не удалось сжать фото'))),
+        'image/jpeg',
+        quality
+      );
+    });
+  }
+
+  async function processFile(file) {
+    const [{ takenAt, source }, hash] = await Promise.all([window.Exif.readTakenAt(file), sha256Hex(file)]);
+    if (hash && state.photos.some((p) => p.hash === hash)) return 'dupes';
+
+    const img = await loadImage(file);
+    let full;
+    let thumb;
+    try {
+      full = await resizeToJpeg(img, FULL_MAX_SIDE, 0.86);
+      thumb = await resizeToJpeg(img, THUMB_MAX_SIDE, 0.8);
+    } finally {
+      URL.revokeObjectURL(img.src);
+    }
+
+    const meta = {
+      taken_at: takenAt,
+      date_source: source,
+      width: full.width,
+      height: full.height,
+      original_name: file.name,
+      sizes: [file.size, full.blob.size, thumb.blob.size],
+    };
+    const res = await fetch('/api/photos', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Meta': encodeURIComponent(JSON.stringify(meta)),
+      },
+      body: new Blob([file, full.blob, thumb.blob]),
+    });
+    if (res.status === 409) return 'dupes';
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
+    state.photos.push(data);
+    return 'added';
+  }
+
+  function updateToast() {
+    const toast = $('toast');
+    clearTimeout(upload.hideTimer);
+    toast.hidden = false;
+    const { total, done, added, dupes, failed } = upload;
+    $('toastBar').style.width = `${total ? (done / total) * 100 : 0}%`;
+
+    if (done < total) {
+      $('toastText').textContent = `Загрузка: ${num(done)} из ${num(total)}`;
+      return;
+    }
+    const parts = [`Добавлено ${num(added)}`];
+    if (dupes) parts.push(`уже были в альбоме: ${num(dupes)}`);
+    if (failed) parts.push(`не удалось: ${num(failed)}`);
+    $('toastText').textContent = parts.join(' · ');
+    upload.hideTimer = setTimeout(() => {
+      toast.hidden = true;
+    }, failed ? 9000 : 5000);
+  }
+
+  let renderTimer = null;
+  function scheduleRender() {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(renderTimeline, upload.done < upload.total ? 800 : 0);
+  }
+
+  // ── События ─────────────────────────────────────────────────────
+  function bindEvents() {
+    const fileInput = $('fileInput');
+    const pick = () => fileInput.click();
+    $('addBtn').addEventListener('click', pick);
+    $('emptyAddBtn').addEventListener('click', pick);
+    fileInput.addEventListener('change', () => {
+      enqueue(fileInput.files);
+      fileInput.value = '';
+    });
+
+    $('orderBtn').addEventListener('click', () => {
+      state.order = state.order === 'asc' ? 'desc' : 'asc';
+      localStorage.setItem('album.order', state.order);
+      renderTimeline();
+    });
+
+    $('randomBtn').addEventListener('click', () => {
+      if (!state.photos.length) return;
+      const pick = state.photos[Math.floor(Math.random() * state.photos.length)];
+      openLightbox(pick.id);
+    });
+
+    $('searchInput').addEventListener('input', (e) => {
+      state.searchQuery = e.target.value.trim();
+      renderTimeline();
+    });
+
+    // Тема (Светлая / Тёмная)
+    const savedTheme = localStorage.getItem('album.theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+    const syncThemeLabel = () => {
+      const current =
+        document.documentElement.dataset.theme ||
+        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      $('themeBtn').textContent = current === 'dark' ? 'Светлая' : 'Тёмная';
+    };
+    syncThemeLabel();
+
+    $('themeBtn').addEventListener('click', () => {
+      const current =
+        document.documentElement.dataset.theme ||
+        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem('album.theme', next);
+      syncThemeLabel();
+    });
+
+    // Перетаскивание файлов в любое место окна
+    let dragDepth = 0;
+    const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+    window.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      dragDepth += 1;
+      $('dropOverlay').hidden = false;
+    });
+    window.addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) $('dropOverlay').hidden = true;
+    });
+    window.addEventListener('dragover', (e) => {
+      if (hasFiles(e)) e.preventDefault();
+    });
+    window.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      $('dropOverlay').hidden = true;
+      enqueue(e.dataTransfer.files);
+    });
+
+    // Клик по фото
+    const onTileClick = (e) => {
+      const tile = e.target.closest('.tile');
+      if (tile) openLightbox(Number(tile.dataset.id));
+    };
+    $('timeline').addEventListener('click', onTileClick);
+    $('onThisDay').addEventListener('click', onTileClick);
+
+    // Подпись к дню
+    $('timeline').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.classList.contains('day-title')) e.target.blur();
+    });
+    $('timeline').addEventListener('change', async (e) => {
+      const input = e.target;
+      if (!input.classList.contains('day-title')) return;
+      const date = input.dataset.date;
+      try {
+        const { title } = await api(`/api/days/${date}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: input.value }),
+        });
+        if (title) state.days[date] = title;
+        else delete state.days[date];
+        input.value = title;
+      } catch (err) {
+        alert(`Не удалось сохранить подпись: ${err.message}`);
+      }
+    });
+
+    // Просмотр
+    $('lbClose').addEventListener('click', closeLightbox);
+    $('lbPrev').addEventListener('click', () => stepLightbox(-1));
+    $('lbNext').addEventListener('click', () => stepLightbox(1));
+    $('lightbox').addEventListener('click', (e) => {
+      if (e.target.id === 'lightbox' || e.target.id === 'lbStage') closeLightbox();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if ($('lightbox').hidden) return;
+      if (e.key === 'Escape') return closeLightbox();
+      if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+      if (e.key === 'ArrowLeft') stepLightbox(-1);
+      if (e.key === 'ArrowRight') stepLightbox(1);
+    });
+
+    let touch = null;
+    $('lbStage').addEventListener(
+      'touchstart',
+      (e) => {
+        if (e.touches.length === 1) touch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      },
+      { passive: true }
+    );
+    $('lbStage').addEventListener('touchend', (e) => {
+      if (!touch) return;
+      const dx = e.changedTouches[0].clientX - touch.x;
+      const dy = e.changedTouches[0].clientY - touch.y;
+      touch = null;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) stepLightbox(dx < 0 ? 1 : -1);
+      else if (dy > 90 && Math.abs(dy) > Math.abs(dx)) closeLightbox();
+    });
+
+    const caption = $('lbCaption');
+    caption.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') caption.blur();
+    });
+    caption.addEventListener('change', async () => {
+      const photo = state.photos[state.lbIndex];
+      if (!photo) return;
+      try {
+        await updatePhoto(photo, { caption: caption.value });
+        const tile = document.querySelector(`.tile[data-id="${photo.id}"]`);
+        if (tile) tile.title = photo.caption;
+      } catch (err) {
+        alert(`Не удалось сохранить подпись: ${err.message}`);
+      }
+    });
+
+    $('lbDateInput').addEventListener('change', async (e) => {
+      const photo = state.photos[state.lbIndex];
+      if (!photo || !e.target.value) return;
+      try {
+        await updatePhoto(photo, { taken_at: `${e.target.value}${photo.taken_at.slice(10)}` });
+        renderTimeline();
+        state.lbIndex = state.photos.indexOf(photo);
+        showLightbox();
+      } catch (err) {
+        alert(`Не удалось изменить дату: ${err.message}`);
+      }
+    });
+
+    $('lbDelete').addEventListener('click', async () => {
+      const photo = state.photos[state.lbIndex];
+      if (!photo || !confirm('Удалить это фото из альбома? Это нельзя отменить.')) return;
+      try {
+        await api(`/api/photos/${photo.id}`, { method: 'DELETE' });
+        state.photos.splice(state.lbIndex, 1);
+        renderTimeline();
+        if (!state.photos.length) return closeLightbox();
+        state.lbIndex = Math.min(state.lbIndex, state.photos.length - 1);
+        showLightbox();
+      } catch (err) {
+        alert(`Не удалось удалить: ${err.message}`);
+      }
+    });
+
+    // Перестраиваем ряды только при реальном изменении ширины
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (window.innerWidth !== state.lastWidth) layoutAll();
+      }, 150);
+    });
+  }
+
+  async function init() {
+    bindEvents();
+    try {
+      const [config, photos, days] = await Promise.all([api('/api/config'), api('/api/photos'), api('/api/days')]);
+      state.config = config;
+      state.photos = photos;
+      state.days = days;
+    } catch (err) {
+      $('emptyText').textContent = `Не удалось загрузить альбом: ${err.message}`;
+    }
+    renderTimeline();
+  }
+
+  init();
+})();
