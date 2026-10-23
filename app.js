@@ -11,6 +11,7 @@
   const THUMB_MAX_SIDE = 800;
 
   const state = {
+    mode: 'idb', // 'server' (если запущен node server.js) или 'idb' (на Vercel / GitHub Pages)
     config: { names: ['Данияр', 'Кадиша'], startDate: '2025-01-12' },
     photos: [],
     days: {},
@@ -23,6 +24,136 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // ── Локальная база IndexedDB (для работы на Vercel / GitHub Pages без бэкенда) ──
+  const idbStore = (() => {
+    let dbPromise = null;
+
+    function open() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open('daniar_kadisha_album_v1', 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('photos')) {
+            const ps = db.createObjectStore('photos', { keyPath: 'id', autoIncrement: true });
+            ps.createIndex('hash', 'hash', { unique: false });
+          }
+          if (!db.objectStoreNames.contains('days')) {
+            db.createObjectStore('days', { keyPath: 'date' });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return dbPromise;
+    }
+
+    function hydratePhotoUrls(rec) {
+      return {
+        id: rec.id,
+        hash: rec.hash,
+        taken_at: rec.taken_at,
+        date_source: rec.date_source || 'exif',
+        width: rec.width,
+        height: rec.height,
+        original_name: rec.original_name || 'photo.jpg',
+        caption: rec.caption || '',
+        thumbUrl: rec.thumbBlob ? URL.createObjectURL(rec.thumbBlob) : '',
+        fullUrl: rec.fullBlob ? URL.createObjectURL(rec.fullBlob) : '',
+        originalUrl: rec.originalBlob ? URL.createObjectURL(rec.originalBlob) : '',
+      };
+    }
+
+    async function listPhotos() {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('photos', 'readonly');
+        const req = tx.objectStore('photos').getAll();
+        req.onsuccess = () => resolve((req.result || []).map(hydratePhotoUrls));
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function addPhoto(record) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('photos', 'readwrite');
+        const store = tx.objectStore('photos');
+        const req = store.add(record);
+        req.onsuccess = () => {
+          const saved = { ...record, id: req.result };
+          resolve(hydratePhotoUrls(saved));
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function updatePhoto(id, patch) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('photos', 'readwrite');
+        const store = tx.objectStore('photos');
+        const getReq = store.get(id);
+        getReq.onsuccess = () => {
+          const existing = getReq.result;
+          if (!existing) return reject(new Error('Фото не найдено'));
+          if (typeof patch.caption === 'string') existing.caption = patch.caption.trim().slice(0, 300);
+          if (patch.taken_at !== undefined) {
+            existing.taken_at = patch.taken_at;
+            existing.date_source = 'manual';
+          }
+          const putReq = store.put(existing);
+          putReq.onsuccess = () => resolve({
+            id: existing.id,
+            caption: existing.caption,
+            taken_at: existing.taken_at,
+            date_source: existing.date_source,
+          });
+          putReq.onerror = () => reject(putReq.error);
+        };
+        getReq.onerror = () => reject(getReq.error);
+      });
+    }
+
+    async function deletePhoto(id) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('photos', 'readwrite');
+        const req = tx.objectStore('photos').delete(id);
+        req.onsuccess = () => resolve({ ok: true, id });
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function listDays() {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('days', 'readonly');
+        const req = tx.objectStore('days').getAll();
+        req.onsuccess = () => {
+          const out = {};
+          for (const row of req.result || []) out[row.date] = row.title;
+          resolve(out);
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function setDay(date, rawTitle) {
+      const db = await open();
+      const title = typeof rawTitle === 'string' ? rawTitle.trim().slice(0, 120) : '';
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('days', 'readwrite');
+        const store = tx.objectStore('days');
+        const req = title ? store.put({ date, title }) : store.delete(date);
+        req.onsuccess = () => resolve({ date, title });
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    return { listPhotos, addPhoto, updatePhoto, deletePhoto, listDays, setDay };
+  })();
+
   // ── Даты ────────────────────────────────────────────────────────
   const pad = (n) => String(n).padStart(2, '0');
   const localDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -33,7 +164,6 @@
   }
 
   function dayIndex(s) {
-    // Math.round сглаживает переходы на летнее время
     return Math.round((toDate(s) - toDate(state.config.startDate)) / 86400000) + 1;
   }
 
@@ -63,6 +193,20 @@
     return n >= 1 ? `день ${num(n)}` : '';
   }
 
+  function getThumbUrl(photo) {
+    return photo.thumbUrl || `/media/thumb/${photo.thumb_file}`;
+  }
+
+  function getFullUrl(photo) {
+    return photo.fullUrl || `/media/full/${photo.full_file}`;
+  }
+
+  function getOriginalUrl(photo) {
+    if (photo.originalUrl) return photo.originalUrl;
+    if (photo.original_file) return `/media/original/${photo.original_file}`;
+    return '';
+  }
+
   // ── DOM-хелперы ─────────────────────────────────────────────────
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -84,7 +228,7 @@
     img.loading = 'lazy';
     img.decoding = 'async';
     img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
-    img.src = `/media/thumb/${photo.thumb_file}`;
+    img.src = getThumbUrl(photo);
     tile.append(img);
     return tile;
   }
@@ -215,8 +359,6 @@
     renderHeader();
   }
 
-  // Ровные ряды как в хорошей фотокниге: каждый ряд растягивается точно по ширине,
-  // пропорции снимков сохраняются.
   function layoutGrid(grid, photos) {
     const width = grid.clientWidth;
     if (!width) return;
@@ -328,15 +470,14 @@
     const photo = state.photos[state.lbIndex];
     if (!photo) return closeLightbox();
 
-    // Сначала показываем уже загруженное превью, затем подменяем на полную версию
     const img = $('lbImg');
-    img.src = `/media/thumb/${photo.thumb_file}`;
+    img.src = getThumbUrl(photo);
     img.alt = photo.caption || '';
     const full = new Image();
     full.onload = () => {
       if (state.photos[state.lbIndex] === photo) img.src = full.src;
     };
-    full.src = `/media/full/${photo.full_file}`;
+    full.src = getFullUrl(photo);
 
     const date = photo.taken_at.slice(0, 10);
     const time = photo.taken_at.slice(11, 16);
@@ -347,10 +488,11 @@
     $('lbDateInput').value = date;
 
     const original = $('lbOriginal');
-    original.hidden = !photo.original_file;
-    if (photo.original_file) {
-      original.href = `/media/original/${photo.original_file}`;
-      original.download = photo.original_name || photo.original_file;
+    const origHref = getOriginalUrl(photo);
+    original.hidden = !origHref;
+    if (origHref) {
+      original.href = origHref;
+      original.download = photo.original_name || 'photo.jpg';
     }
 
     $('lbPrev').hidden = state.lbIndex === 0;
@@ -358,7 +500,7 @@
 
     for (const j of [state.lbIndex - 1, state.lbIndex + 1]) {
       const next = state.photos[j];
-      if (next) new Image().src = `/media/full/${next.full_file}`;
+      if (next) new Image().src = getFullUrl(next);
     }
   }
 
@@ -370,20 +512,42 @@
   }
 
   async function updatePhoto(photo, patch) {
-    const updated = await api(`/api/photos/${photo.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
+    if (state.mode === 'server') {
+      const updated = await api(`/api/photos/${photo.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      Object.assign(photo, updated);
+      return photo;
+    }
+    const updated = await idbStore.updatePhoto(photo.id, patch);
     Object.assign(photo, updated);
     return photo;
+  }
+
+  // ── Поддержка HEIC/HEIF для Chrome на Mac/Windows ───────────────
+  let heicLoaderPromise = null;
+  function loadHeic2Any() {
+    if (window.heic2any) return Promise.resolve(window.heic2any);
+    if (heicLoaderPromise) return heicLoaderPromise;
+    heicLoaderPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+      script.onload = () => resolve(window.heic2any);
+      script.onerror = () => reject(new Error('Не удалось загрузить декодер HEIC'));
+      document.head.appendChild(script);
+    });
+    return heicLoaderPromise;
   }
 
   // ── Загрузка ────────────────────────────────────────────────────
   const upload = { queue: [], active: 0, total: 0, done: 0, added: 0, dupes: 0, failed: 0, hideTimer: null };
 
   function enqueue(fileList) {
-    const files = [...fileList].filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+    const files = [...fileList].filter(
+      (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|avif|heic|heif)$/i.test(f.name)
+    );
     if (!files.length) return;
     if (upload.active === 0 && upload.queue.length === 0) {
       Object.assign(upload, { total: 0, done: 0, added: 0, dupes: 0, failed: 0 });
@@ -417,21 +581,40 @@
   }
 
   async function sha256Hex(file) {
-    if (!window.crypto || !crypto.subtle) return null; // недоступно по http с другого устройства
+    if (!window.crypto || !crypto.subtle) return null;
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
     return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
-  function loadImage(file) {
+  function decodeBlobToImage(blob) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => {
-        URL.revokeObjectURL(img.src);
-        reject(new Error('Браузер не может открыть этот файл (возможно, HEIC)'));
+      const url = URL.createObjectURL(blob);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
       };
-      img.src = URL.createObjectURL(file);
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Image decode failed'));
+      };
+      img.src = url;
     });
+  }
+
+  async function loadImage(file) {
+    try {
+      return await decodeBlobToImage(file);
+    } catch (err) {
+      // Если это HEIC/HEIF в браузере Chrome — конвертируем через heic2any
+      if (/\.(heic|heif)$/i.test(file.name) || /heic|heif/i.test(file.type)) {
+        const heic2any = await loadHeic2Any();
+        const converted = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+        const jpegBlob = Array.isArray(converted) ? converted[0] : converted;
+        return decodeBlobToImage(jpegBlob);
+      }
+      throw err;
+    }
   }
 
   function resizeToJpeg(img, maxSide, quality) {
@@ -460,35 +643,47 @@
     if (hash && state.photos.some((p) => p.hash === hash)) return 'dupes';
 
     const img = await loadImage(file);
-    let full;
-    let thumb;
-    try {
-      full = await resizeToJpeg(img, FULL_MAX_SIDE, 0.86);
-      thumb = await resizeToJpeg(img, THUMB_MAX_SIDE, 0.8);
-    } finally {
-      URL.revokeObjectURL(img.src);
+    const full = await resizeToJpeg(img, FULL_MAX_SIDE, 0.86);
+    const thumb = await resizeToJpeg(img, THUMB_MAX_SIDE, 0.8);
+
+    if (state.mode === 'server') {
+      const meta = {
+        taken_at: takenAt,
+        date_source: source,
+        width: full.width,
+        height: full.height,
+        original_name: file.name,
+        sizes: [file.size, full.blob.size, thumb.blob.size],
+      };
+      const res = await fetch('/api/photos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Meta': encodeURIComponent(JSON.stringify(meta)),
+        },
+        body: new Blob([file, full.blob, thumb.blob]),
+      });
+      if (res.status === 409) return 'dupes';
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
+      state.photos.push(data);
+      return 'added';
     }
 
-    const meta = {
+    // Режим IndexedDB (на Vercel / GitHub Pages)
+    const saved = await idbStore.addPhoto({
+      hash,
       taken_at: takenAt,
       date_source: source,
       width: full.width,
       height: full.height,
       original_name: file.name,
-      sizes: [file.size, full.blob.size, thumb.blob.size],
-    };
-    const res = await fetch('/api/photos', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-Meta': encodeURIComponent(JSON.stringify(meta)),
-      },
-      body: new Blob([file, full.blob, thumb.blob]),
+      caption: '',
+      thumbBlob: thumb.blob,
+      fullBlob: full.blob,
+      originalBlob: file,
     });
-    if (res.status === 409) return 'dupes';
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
-    state.photos.push(data);
+    state.photos.push(saved);
     return 'added';
   }
 
@@ -537,8 +732,8 @@
 
     $('randomBtn').addEventListener('click', () => {
       if (!state.photos.length) return;
-      const pick = state.photos[Math.floor(Math.random() * state.photos.length)];
-      openLightbox(pick.id);
+      const pickPhoto = state.photos[Math.floor(Math.random() * state.photos.length)];
+      openLightbox(pickPhoto.id);
     });
 
     $('searchInput').addEventListener('input', (e) => {
@@ -610,11 +805,18 @@
       if (!input.classList.contains('day-title')) return;
       const date = input.dataset.date;
       try {
-        const { title } = await api(`/api/days/${date}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: input.value }),
-        });
+        let title = '';
+        if (state.mode === 'server') {
+          const res = await api(`/api/days/${date}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: input.value }),
+          });
+          title = res.title;
+        } else {
+          const res = await idbStore.setDay(date, input.value);
+          title = res.title;
+        }
         if (title) state.days[date] = title;
         else delete state.days[date];
         input.value = title;
@@ -689,7 +891,11 @@
       const photo = state.photos[state.lbIndex];
       if (!photo || !confirm('Удалить это фото из альбома? Это нельзя отменить.')) return;
       try {
-        await api(`/api/photos/${photo.id}`, { method: 'DELETE' });
+        if (state.mode === 'server') {
+          await api(`/api/photos/${photo.id}`, { method: 'DELETE' });
+        } else {
+          await idbStore.deletePhoto(photo.id);
+        }
         state.photos.splice(state.lbIndex, 1);
         renderTimeline();
         if (!state.photos.length) return closeLightbox();
@@ -700,7 +906,6 @@
       }
     });
 
-    // Перестраиваем ряды только при реальном изменении ширины
     let resizeTimer = null;
     window.addEventListener('resize', () => {
       clearTimeout(resizeTimer);
@@ -713,12 +918,30 @@
   async function init() {
     bindEvents();
     try {
-      const [config, photos, days] = await Promise.all([api('/api/config'), api('/api/photos'), api('/api/days')]);
-      state.config = config;
+      // Проверяем, запущен ли Node.js сервер (/api/config).
+      // Если открыто на Vercel или GitHub Pages (возвращает 404), автоматически переключаемся на IndexedDB.
+      const probe = await fetch('/api/config');
+      if (probe.ok && (probe.headers.get('content-type') || '').includes('application/json')) {
+        state.mode = 'server';
+        const [config, photos, days] = await Promise.all([
+          probe.json(),
+          api('/api/photos'),
+          api('/api/days'),
+        ]);
+        state.config = config;
+        state.photos = photos;
+        state.days = days;
+      } else {
+        state.mode = 'idb';
+        const [photos, days] = await Promise.all([idbStore.listPhotos(), idbStore.listDays()]);
+        state.photos = photos;
+        state.days = days;
+      }
+    } catch {
+      state.mode = 'idb';
+      const [photos, days] = await Promise.all([idbStore.listPhotos(), idbStore.listDays()]);
       state.photos = photos;
       state.days = days;
-    } catch (err) {
-      $('emptyText').textContent = `Не удалось загрузить альбом: ${err.message}`;
     }
     renderTimeline();
   }
