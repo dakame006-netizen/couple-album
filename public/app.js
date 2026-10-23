@@ -401,8 +401,19 @@
     img.alt = photo.caption || '';
     img.loading = 'lazy';
     img.decoding = 'async';
-    img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+    img.addEventListener('load', () => img.classList.add('loaded'));
+    img.addEventListener('error', () => {
+      // Фолбэк на полную версию, если превью не успело сгенерироваться или отдалось с задержкой
+      if (photo.fullUrl && img.src !== photo.fullUrl) {
+        img.src = photo.fullUrl;
+      } else {
+        img.classList.add('loaded');
+      }
+    });
     img.src = getThumbUrl(photo);
+    if (img.complete && img.naturalWidth > 0) {
+      img.classList.add('loaded');
+    }
     tile.append(img);
     return tile;
   }
