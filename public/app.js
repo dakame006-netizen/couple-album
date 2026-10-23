@@ -10,8 +10,14 @@
   const FULL_MAX_SIDE = 2048;
   const THUMB_MAX_SIDE = 800;
 
+  const SUPABASE_CONFIG = {
+    url: 'https://yhowzodbnytqadgadwbc.supabase.co',
+    anonKey: 'sb_publishable_KrzuoSqfvB9kMEHiqDqSzw_lQSTd-ot',
+    bucket: 'photos'
+  };
+
   const state = {
-    mode: 'idb', // 'server' (если запущен node server.js) или 'idb' (на Vercel / GitHub Pages)
+    mode: 'supabase', // 'supabase' (общее облако) | 'server' (localhost) | 'idb' (локально)
     config: { names: ['Данияр', 'Кадиша'], startDate: '2025-01-12' },
     photos: [],
     days: {},
@@ -23,6 +29,174 @@
   };
 
   const $ = (id) => document.getElementById(id);
+
+  // ── Облачное хранилище Supabase (синхронизация между всеми телефонами и ПК) ──
+  const supabaseStore = (() => {
+    const headers = () => ({
+      'apikey': SUPABASE_CONFIG.anonKey,
+      'Authorization': `Bearer ${SUPABASE_CONFIG.anonKey}`,
+    });
+
+    async function listPhotos() {
+      const res = await fetch(`${SUPABASE_CONFIG.url}/rest/v1/photos?select=*&order=taken_at.asc,id.asc`, {
+        headers: headers()
+      });
+      if (!res.ok) throw new Error('Supabase photos fetch failed');
+      const data = await res.json();
+      return (data || []).map(p => ({
+        id: p.id,
+        hash: p.hash,
+        taken_at: p.taken_at,
+        date_source: p.date_source || 'exif',
+        width: p.width,
+        height: p.height,
+        original_name: p.original_name || 'photo.jpg',
+        caption: p.caption || '',
+        thumbUrl: p.thumb_url,
+        fullUrl: p.full_url,
+        originalUrl: p.original_url || p.full_url
+      }));
+    }
+
+    async function uploadBlob(path, blob, contentType) {
+      const res = await fetch(`${SUPABASE_CONFIG.url}/storage/v1/object/${SUPABASE_CONFIG.bucket}/${path}`, {
+        method: 'POST',
+        headers: {
+          ...headers(),
+          'Content-Type': contentType,
+          'x-upsert': 'true'
+        },
+        body: blob
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Upload to storage failed: ${err}`);
+      }
+      return `${SUPABASE_CONFIG.url}/storage/v1/object/public/${SUPABASE_CONFIG.bucket}/${path}`;
+    }
+
+    async function addPhoto({ hash, takenAt, source, full, thumb, file }) {
+      const idPrefix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const thumbPath = `thumb/${idPrefix}.jpg`;
+      const fullPath = `full/${idPrefix}.jpg`;
+      const origExt = (file.name.match(/\.[^.]+$/) || ['.jpg'])[0].toLowerCase();
+      const origPath = `orig/${idPrefix}${origExt}`;
+
+      const [thumbUrl, fullUrl, originalUrl] = await Promise.all([
+        uploadBlob(thumbPath, thumb.blob, 'image/jpeg'),
+        uploadBlob(fullPath, full.blob, 'image/jpeg'),
+        uploadBlob(origPath, file, file.type || 'image/jpeg')
+      ]);
+
+      const insertRes = await fetch(`${SUPABASE_CONFIG.url}/rest/v1/photos`, {
+        method: 'POST',
+        headers: {
+          ...headers(),
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify({
+          hash,
+          taken_at: takenAt,
+          date_source: source,
+          width: full.width,
+          height: full.height,
+          original_name: file.name,
+          caption: '',
+          thumb_url: thumbUrl,
+          full_url: fullUrl,
+          original_url: originalUrl
+        })
+      });
+
+      if (!insertRes.ok) {
+        const err = await insertRes.text();
+        throw new Error(`Failed to insert record: ${err}`);
+      }
+
+      const rows = await insertRes.json();
+      const p = rows[0];
+      return {
+        id: p.id,
+        hash: p.hash,
+        taken_at: p.taken_at,
+        date_source: p.date_source,
+        width: p.width,
+        height: p.height,
+        original_name: p.original_name,
+        caption: p.caption || '',
+        thumbUrl: p.thumb_url,
+        fullUrl: p.full_url,
+        originalUrl: p.original_url
+      };
+    }
+
+    async function updatePhoto(id, patch) {
+      const updateData = {};
+      if (typeof patch.caption === 'string') updateData.caption = patch.caption.trim().slice(0, 300);
+      if (patch.taken_at !== undefined) {
+        updateData.taken_at = patch.taken_at;
+        updateData.date_source = 'manual';
+      }
+
+      const res = await fetch(`${SUPABASE_CONFIG.url}/rest/v1/photos?id=eq.${id}`, {
+        method: 'PATCH',
+        headers: {
+          ...headers(),
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify(updateData)
+      });
+      if (!res.ok) throw new Error('Update failed');
+      const rows = await res.json();
+      return rows[0];
+    }
+
+    async function deletePhoto(id) {
+      const res = await fetch(`${SUPABASE_CONFIG.url}/rest/v1/photos?id=eq.${id}`, {
+        method: 'DELETE',
+        headers: headers()
+      });
+      if (!res.ok) throw new Error('Delete failed');
+      return { ok: true, id };
+    }
+
+    async function listDays() {
+      const res = await fetch(`${SUPABASE_CONFIG.url}/rest/v1/days?select=*`, {
+        headers: headers()
+      });
+      if (!res.ok) return {};
+      const data = await res.json();
+      const out = {};
+      for (const row of data || []) out[row.date] = row.title;
+      return out;
+    }
+
+    async function setDay(date, rawTitle) {
+      const title = typeof rawTitle === 'string' ? rawTitle.trim().slice(0, 120) : '';
+      if (!title) {
+        await fetch(`${SUPABASE_CONFIG.url}/rest/v1/days?date=eq.${date}`, {
+          method: 'DELETE',
+          headers: headers()
+        });
+        return { date, title: '' };
+      }
+
+      const res = await fetch(`${SUPABASE_CONFIG.url}/rest/v1/days`, {
+        method: 'POST',
+        headers: {
+          ...headers(),
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates,return=representation'
+        },
+        body: JSON.stringify({ date, title })
+      });
+      return { date, title };
+    }
+
+    return { listPhotos, addPhoto, updatePhoto, deletePhoto, listDays, setDay };
+  })();
 
   // ── Локальная база IndexedDB (для работы на Vercel / GitHub Pages без бэкенда) ──
   const idbStore = (() => {
@@ -512,6 +686,11 @@
   }
 
   async function updatePhoto(photo, patch) {
+    if (state.mode === 'supabase') {
+      const updated = await supabaseStore.updatePhoto(photo.id, patch);
+      Object.assign(photo, updated);
+      return photo;
+    }
     if (state.mode === 'server') {
       const updated = await api(`/api/photos/${photo.id}`, {
         method: 'PATCH',
@@ -645,6 +824,19 @@
     const img = await loadImage(file);
     const full = await resizeToJpeg(img, FULL_MAX_SIDE, 0.86);
     const thumb = await resizeToJpeg(img, THUMB_MAX_SIDE, 0.8);
+
+    if (state.mode === 'supabase') {
+      const saved = await supabaseStore.addPhoto({
+        hash,
+        takenAt,
+        source,
+        full,
+        thumb,
+        file
+      });
+      state.photos.push(saved);
+      return 'added';
+    }
 
     if (state.mode === 'server') {
       const meta = {
@@ -806,7 +998,10 @@
       const date = input.dataset.date;
       try {
         let title = '';
-        if (state.mode === 'server') {
+        if (state.mode === 'supabase') {
+          const res = await supabaseStore.setDay(date, input.value);
+          title = res.title;
+        } else if (state.mode === 'server') {
           const res = await api(`/api/days/${date}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -891,7 +1086,9 @@
       const photo = state.photos[state.lbIndex];
       if (!photo || !confirm('Удалить это фото из альбома? Это нельзя отменить.')) return;
       try {
-        if (state.mode === 'server') {
+        if (state.mode === 'supabase') {
+          await supabaseStore.deletePhoto(photo.id);
+        } else if (state.mode === 'server') {
           await api(`/api/photos/${photo.id}`, { method: 'DELETE' });
         } else {
           await idbStore.deletePhoto(photo.id);
@@ -918,26 +1115,35 @@
   async function init() {
     bindEvents();
     try {
-      // Проверяем, запущен ли Node.js сервер (/api/config).
-      // Если открыто на Vercel или GitHub Pages (возвращает 404), автоматически переключаемся на IndexedDB.
-      const probe = await fetch('/api/config');
-      if (probe.ok && (probe.headers.get('content-type') || '').includes('application/json')) {
-        state.mode = 'server';
-        const [config, photos, days] = await Promise.all([
-          probe.json(),
-          api('/api/photos'),
-          api('/api/days'),
+      if (SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey) {
+        state.mode = 'supabase';
+        const [photos, days] = await Promise.all([
+          supabaseStore.listPhotos(),
+          supabaseStore.listDays()
         ]);
-        state.config = config;
         state.photos = photos;
         state.days = days;
       } else {
-        state.mode = 'idb';
-        const [photos, days] = await Promise.all([idbStore.listPhotos(), idbStore.listDays()]);
-        state.photos = photos;
-        state.days = days;
+        const probe = await fetch('/api/config');
+        if (probe.ok && (probe.headers.get('content-type') || '').includes('application/json')) {
+          state.mode = 'server';
+          const [config, photos, days] = await Promise.all([
+            probe.json(),
+            api('/api/photos'),
+            api('/api/days'),
+          ]);
+          state.config = config;
+          state.photos = photos;
+          state.days = days;
+        } else {
+          state.mode = 'idb';
+          const [photos, days] = await Promise.all([idbStore.listPhotos(), idbStore.listDays()]);
+          state.photos = photos;
+          state.days = days;
+        }
       }
-    } catch {
+    } catch (err) {
+      console.warn('Init error, falling back to idb:', err);
       state.mode = 'idb';
       const [photos, days] = await Promise.all([idbStore.listPhotos(), idbStore.listDays()]);
       state.photos = photos;
