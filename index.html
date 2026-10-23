@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f5f3ef" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
+  <title>Данияр и Кадиша</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;1,400&family=Inter:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="hero">
+    <p class="hero-eyebrow" id="since">вместе с 12 января 2025</p>
+    <h1 class="hero-title" id="names">Данияр <span class="amp">и</span> Кадиша</h1>
+    <p class="hero-stats">
+      <span id="daysTogether"></span>
+      <span class="dot">·</span>
+      <span id="photoCount"></span>
+    </p>
+  </header>
+
+  <nav class="toolbar">
+    <div class="toolbar-inner">
+      <div class="toolbar-left">
+        <button class="btn-text" id="orderBtn" type="button"></button>
+        <button class="btn-text" id="randomBtn" type="button" hidden>Случайный кадр</button>
+      </div>
+      <div class="toolbar-right">
+        <input
+          type="search"
+          id="searchInput"
+          class="toolbar-search"
+          placeholder="Поиск по дням и подписям…"
+          aria-label="Поиск по дням и подписям"
+        />
+        <button class="btn-text" id="themeBtn" type="button" title="Переключить тему">Тема</button>
+        <button class="btn" id="addBtn" type="button">Добавить фото</button>
+      </div>
+    </div>
+  </nav>
+  <input type="file" id="fileInput" multiple accept="image/*,.heic,.heif" hidden />
+
+  <section class="on-this-day" id="onThisDay" hidden></section>
+
+  <main class="timeline" id="timeline"></main>
+
+  <div class="empty" id="empty" hidden>
+    <p class="empty-title">Здесь начнётся ваша история</p>
+    <p class="empty-text" id="emptyText">
+      Перетащите фотографии в окно или нажмите «Добавить фото». Можно выбрать сразу сотни —
+      каждая сама встанет на свою дату по данным камеры.
+    </p>
+    <button class="btn" id="emptyAddBtn" type="button">Выбрать фотографии</button>
+  </div>
+
+  <aside class="rail" id="rail" hidden></aside>
+
+  <div class="drop-overlay" id="dropOverlay" hidden>Отпустите, чтобы добавить</div>
+
+  <div class="toast" id="toast" hidden>
+    <div id="toastText"></div>
+    <div class="toast-bar"><span id="toastBar"></span></div>
+  </div>
+
+  <div class="lightbox" id="lightbox" hidden>
+    <button class="lb-close" id="lbClose" type="button" aria-label="Закрыть">×</button>
+    <button class="lb-nav lb-prev" id="lbPrev" type="button" aria-label="Предыдущее">‹</button>
+    <button class="lb-nav lb-next" id="lbNext" type="button" aria-label="Следующее">›</button>
+    <figure class="lb-stage" id="lbStage"><img id="lbImg" alt="" /></figure>
+    <div class="lb-panel">
+      <div class="lb-meta">
+        <span id="lbDate"></span>
+        <span id="lbDay"></span>
+      </div>
+      <input class="lb-caption" id="lbCaption" placeholder="Подпись к фото" maxlength="300" />
+      <div class="lb-actions">
+        <label class="lb-action">Дата <input type="date" id="lbDateInput" /></label>
+        <a class="lb-action" id="lbOriginal" download>Скачать оригинал</a>
+        <button class="lb-action danger" id="lbDelete" type="button">Удалить</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/exif.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
